@@ -1,4 +1,5 @@
 
+
 # 김대리 개인비서 에이블의 Streamlit 화면
 import json
 import os
@@ -17,12 +18,28 @@ def load_local_env():
     if not os.path.exists("api_key.txt"):
         return
     with open("api_key.txt", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        lines = f.read().splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value in ('"""', "'''"):
+            quote = value
+            chunks = []
+            while index < len(lines) and lines[index].strip() != quote:
+                chunks.append(lines[index])
+                index += 1
+            if index < len(lines) and lines[index].strip() == quote:
+                index += 1
+            value = "\n".join(chunks).strip()
+        else:
+            value = value.strip('"').strip("'")
+        os.environ.setdefault(key, value)
 
 
 load_local_env()
@@ -124,8 +141,11 @@ def load_google_credentials():
     info = None
     raw = os.getenv("GOOGLE_TOKEN", "").strip()
     if raw:
-        info = json.loads(raw)
-    elif os.path.exists("token.json"):
+        try:
+            info = json.loads(raw)
+        except json.JSONDecodeError:
+            info = None
+    if not info and os.path.exists("token.json"):
         with open("token.json", encoding="utf-8") as f:
             info = json.load(f)
     if not info:
