@@ -458,7 +458,7 @@ def sync_checklist(events):
             task['description'] = old.get('description','')
         evidence = (event.get('evidence') or '').strip()
         task['evidence_verified'] = bool(evidence and re.sub(r'\s+','',evidence) in re.sub(r'\s+','',st.session_state.meeting_text))
-        task['evidence'] = evidence if task['evidence_verified'] else ''
+        task['evidence'] = evidence
         if not old.get('edited'):
             try:
                 resolved_event, resolution = resolve_event_deadline(event, st.session_state.meeting_date)
@@ -2010,6 +2010,30 @@ def render_meetings():
         with st.container(border=True, key='card_summary'):
             if st.session_state.summary:
                 st.markdown(readable_markdown(st.session_state.summary))
+                st.caption('🔊 회의 요약 내용을 음성으로도 들을 수 있어요.')
+                summary_text = readable_markdown(st.session_state.summary)
+                summary_key = hashlib.sha256(summary_text.encode('utf-8')).hexdigest()
+                if st.button('🔊 회의 요약 듣기', key='listen_meeting_summary', use_container_width=True):
+                    try:
+                        speech_text = summary_text[:3500]
+                        if len(summary_text) > 3500:
+                            st.info('요약이 길어 앞부분부터 음성으로 재생합니다.')
+                        with st.spinner('회의 요약 음성을 생성하고 있어요...'):
+                            speech = client.audio.speech.create(
+                                model='tts-1',
+                                voice='alloy',
+                                input=speech_text,
+                                response_format='mp3',
+                            )
+                            st.session_state.meeting_summary_audio = speech.content
+                            st.session_state.meeting_summary_audio_key = summary_key
+                    except Exception:
+                        st.error('음성 생성에 실패했습니다. OpenAI API 설정을 확인해 주세요.')
+                if (
+                    st.session_state.get('meeting_summary_audio_key') == summary_key
+                    and st.session_state.get('meeting_summary_audio')
+                ):
+                    st.audio(st.session_state.meeting_summary_audio, format='audio/mp3')
             else:
                 st.info('회의록을 업로드한 뒤 ‘요약 및 업무 생성’을 누르면 요약과 업무가 정리됩니다.')
     with tasks_tab:
@@ -2240,9 +2264,12 @@ def render_evidence(task):
     with st.expander('업무 원문 근거 보기 · ' + task['title']):
         if task.get('source') == 'manual':
             st.caption('사용자가 직접 추가한 업무입니다.')
-        elif task.get('evidence_verified'):
-            st.caption('원문 대조 완료 · ' + task.get('meeting_name', '회의록'))
-            st.write(task['evidence'])
+        elif task_evidence_quote(task):
+            if task.get('evidence_verified'):
+                st.caption('원문 대조 완료 · ' + task.get('meeting_name', '회의록'))
+            else:
+                st.caption('회의 요약의 원본 근거 · 원문과 완전히 같지는 않습니다')
+            st.write(task_evidence_quote(task))
         else:
             st.warning('원문과 일치하는 근거가 확인되지 않았습니다. 해당 회의를 다시 분석하거나 원문을 확인하세요.')
 
@@ -2448,6 +2475,26 @@ def render_calendar_dashboard():
             st.info(str(event.get('title', '선택한 일정')) + ' · ' + str(event.get('start', '')).replace('T', ' ')[:16])
         st.caption('진행 중이며 날짜가 정해진 업무를 표시합니다. 날짜 미정 업무는 내 업무에서 확인하세요.')
 
+def task_evidence_quote(task):
+    """업무에 남은 근거가 없으면, 분석 결과의 evidence를 회의 요약과 같은 문장으로 보여 줍니다."""
+    quote = (task.get('evidence') or '').strip()
+    if quote:
+        return quote
+    title = (task.get('extracted_title') or task.get('title') or '').strip()
+    if not title:
+        return ''
+    pools = [st.session_state.get('events') or []]
+    for item in st.session_state.get('uploads') or []:
+        pools.append((item.get('snapshot') or {}).get('events') or [])
+    for events in pools:
+        for event in events:
+            if (event.get('summary') or '').strip() == title:
+                found = (event.get('evidence') or '').strip()
+                if found:
+                    return found
+    return ''
+
+
 def render_task_row(task, trashed=False, prefix=''):
     key = prefix + task['task_id']
     with st.container(border=True, key='card_task_' + key):
@@ -2499,11 +2546,15 @@ def render_task_row(task, trashed=False, prefix=''):
                 st.caption('기한 원문: ' + task['due_text'])
             if task.get('date_resolution'):
                 st.caption('날짜 해석: ' + task['date_resolution'] + ' · 기준일 ' + task.get('deadline_base', ''))
+            quote = task_evidence_quote(task)
             if task.get('source') == 'manual':
                 st.caption('직접 추가한 업무입니다.')
-            elif task.get('evidence_verified'):
+            elif quote and task.get('evidence_verified'):
                 st.caption('원문 대조 완료')
-                st.write(task.get('evidence', ''))
+                st.write(quote)
+            elif quote:
+                st.caption('회의 요약의 원본 근거입니다. 원문과 완전히 같지는 않습니다.')
+                st.write(quote)
             else:
                 st.warning('원문 근거 확인이 필요합니다. 회의 원문을 확인하거나 다시 분석하세요.')
             if task.get('google_event_url'):
@@ -2680,6 +2731,20 @@ def render_home():
                 run_request(query, None)
             except Exception:
                 st.error('요청 처리에 실패했습니다. 서비스 설정과 연결 상태를 확인하세요.')
+        with st.expander('🎙️ 음성으로 업무 요청하기', expanded=False):
+            st.caption('마이크로 요청을 녹음한 뒤 음성 요청 보내기를 눌러 주세요.')
+            home_audio = st.audio_input('음성 녹음', key='home_voice_input')
+            if st.button(
+                '🎙️ 음성 요청 보내기',
+                key='home_voice_send',
+                disabled=home_audio is None,
+                use_container_width=True,
+            ):
+                _open_chat(compose=False)
+                try:
+                    run_request('', home_audio)
+                except Exception:
+                    st.error('요청 처리에 실패했습니다. 서비스 설정과 연결 상태를 확인하세요.')
 
 def _email_file_text(uploaded):
     """첨부 자료를 초안용 텍스트로 바꿉니다. 원본 파일은 저장하지 않습니다."""
