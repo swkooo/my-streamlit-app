@@ -36,7 +36,7 @@ KST = timezone(timedelta(hours=9))
 # TTS가 실패(503 요청 몰림 등)하면 2순위로 Gemini Live를 조각별로 동시에 사용합니다.
 # 실측: Live는 말하는 속도(한국어 약 7자/초)로만 음성을 보내 389자 답변이 약 55초 걸리고,
 #       조각을 나눠 동시에 만들면 약 20초로 줄지만 조각마다 음색이 달라질 수 있습니다.
-VOICE_MODEL = "gemini-3.8-flash-lite-tts"  # 더 빠르게: "gemini-3.8-flash-lite-tts" (실측 약 2배 빠름)
+VOICE_MODEL = "gemini-3.8-flash-tts"  # 더 빠르게: "gemini-3.8-flash-lite-tts" (실측 약 2배 빠름)
 VOICE_NAME = "Leda"
 VOICE_TTS_TIMEOUT_SECONDS = 25  # 전용 TTS 대기 제한 (재시도 포함)
 VOICE_TTS_ATTEMPTS = 2  # 전용 TTS 시도 횟수
