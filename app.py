@@ -2128,46 +2128,64 @@ def render_meeting_picker(location):
                     if not text.strip():
                         st.error('내용이 비어 있는 회의록입니다.')
                     else:
+                        # 업로드 직후에는 화면을 다시 실행하지 않습니다.
+                        # 아래 생성 버튼을 누를 때까지 업로드 창을 열어 둡니다.
                         remember_upload(uploaded.name, text)
                         st.session_state[widget_key] = signature
-                        st.rerun()
+                        st.session_state.meeting_upload_open = True
 
     meeting_id = st.session_state.get('meeting_id', '')
-    if meeting_id:
+    already_analyzed = bool(
+        meeting_id
+        and st.session_state.get('analyzed_meeting_id') == meeting_id
+    )
+
+    # 회의록을 선택하기 전에도 버튼을 표시합니다.
+    if not meeting_id:
+        st.button(
+            '요약 및 업무 생성',
+            key='summarize_meeting_' + location + '_empty',
+            type='primary',
+            use_container_width=True,
+            disabled=True,
+            help='회의록을 먼저 업로드하거나 최근 회의를 선택하세요.',
+        )
+        st.caption('회의록을 업로드하거나 최근 회의를 선택한 뒤 생성할 수 있습니다.')
+    else:
         st.caption(
             '현재 회의: '
             + st.session_state.get('current_meeting_name', '선택한 회의록')
         )
 
-        already_analyzed = (
-            st.session_state.get('analyzed_meeting_id') == meeting_id
-        )
-
         if already_analyzed:
-            st.success('이 회의록은 이미 요약과 업무 생성이 완료됐습니다.')
-        else:
-            if st.button(
+            st.button(
                 '요약 및 업무 생성',
                 key='summarize_meeting_' + location + '_' + meeting_id,
                 type='primary',
                 use_container_width=True,
-            ):
-                try:
-                    with st.spinner(
-                        '회의록을 분석하고 요약과 업무를 정리하고 있습니다...'
-                    ):
-                        result = summarize_meeting()
+                disabled=True,
+            )
+            st.success('이 회의록은 이미 요약과 업무 생성이 완료됐습니다.')
+        elif st.button(
+            '요약 및 업무 생성',
+            key='summarize_meeting_' + location + '_' + meeting_id,
+            type='primary',
+            use_container_width=True,
+        ):
+            try:
+                with st.spinner('회의록을 분석하고 요약과 업무를 정리하고 있습니다...'):
+                    result = summarize_meeting()
 
-                    if result.get('status') == 'failed':
-                        st.error(
-                            result.get('error', '회의록 분석에 실패했습니다.')
-                        )
-                    else:
-                        checkpoint_current_meeting()
-                        st.success('회의록 요약과 업무 정리가 완료됐습니다.')
-                        st.rerun()
-                except Exception as error:
-                    st.error('회의록 분석 중 오류가 발생했습니다. ' + str(error))
+                if result.get('status') == 'failed':
+                    st.error(result.get('error', '회의록 분석에 실패했습니다.'))
+                else:
+                    checkpoint_current_meeting()
+                    # 성공했을 때만 다음 재실행에서 업로드 창을 접습니다.
+                    st.session_state.meeting_upload_open = False
+                    st.success('회의록 요약과 업무 정리가 완료됐습니다.')
+                    st.rerun()
+            except Exception as error:
+                st.error('회의록 분석 중 오류가 발생했습니다. ' + str(error))
 
     render_meeting_date(location)
 
@@ -2194,6 +2212,7 @@ def render_meeting_picker(location):
                 use_container_width=True,
             ):
                 select_meeting(item['text'])
+                st.session_state.meeting_upload_open = True
                 st.rerun()
 
         if not st.session_state.uploads:
@@ -2202,7 +2221,6 @@ def render_meeting_picker(location):
             st.caption(
                 '기록 보관·복원은 사이드바의 기록 백업 · 복원에서 이용하세요.'
             )
-
 
 def render_meeting_date(location):
     """선택한 회의에 기준일을 저장합니다. 바뀌면 자동 계산 업무만 재계산·재연동합니다."""
@@ -2514,7 +2532,13 @@ def render_meeting_context(location):
         current = st.session_state.get('meeting_date')
         if current:
             st.caption('회의 기준일 ' + current)
-        with st.expander('회의 변경 · 새 회의록 업로드', expanded=not bool(st.session_state.get('meeting_id'))):
+        with st.expander(
+            '회의 변경 · 새 회의록 업로드',
+            expanded=st.session_state.get(
+                'meeting_upload_open',
+                not bool(st.session_state.get('meeting_id')),
+            ),
+        ):
             render_meeting_picker(location)
 
 
