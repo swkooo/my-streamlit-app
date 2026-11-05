@@ -36,7 +36,7 @@ KST = timezone(timedelta(hours=9))
 # TTS가 실패(503 요청 몰림 등)하면 2순위로 Gemini Live를 조각별로 동시에 사용합니다.
 # 실측: Live는 말하는 속도(한국어 약 7자/초)로만 음성을 보내 389자 답변이 약 55초 걸리고,
 #       조각을 나눠 동시에 만들면 약 20초로 줄지만 조각마다 음색이 달라질 수 있습니다.
-VOICE_MODEL = "gemini-3.8-flash-tts"  # 더 빠르게: "gemini-3.8-flash-lite-tts" (실측 약 2배 빠름)
+VOICE_MODEL = "gemini-3.8-flash-lite-tts"  # 더 빠르게: "gemini-3.8-flash-lite-tts" (실측 약 2배 빠름)
 VOICE_NAME = "Leda"
 VOICE_TTS_TIMEOUT_SECONDS = 25  # 전용 TTS 대기 제한 (재시도 포함)
 VOICE_TTS_ATTEMPTS = 2  # 전용 TTS 시도 횟수
@@ -2101,8 +2101,9 @@ def render_meetings():
 
 
 def render_meeting_picker(location):
-    """회의록을 업로드하면 새 원문은 즉시 분석합니다. 동일 원문은 다시 분석하지 않습니다."""
+    """회의록을 업로드·선택하고, 버튼을 눌렀을 때 요약과 업무를 생성합니다."""
     st.markdown('**회의록 업로드 · 최근 회의**')
+
     uploaded = st.file_uploader(
         'UTF-8 회의록 (.txt, 최대 50MB)',
         type=['txt'],
@@ -2127,41 +2128,46 @@ def render_meeting_picker(location):
                     if not text.strip():
                         st.error('내용이 비어 있는 회의록입니다.')
                     else:
-                        meeting_id = hashlib.sha256(text.encode('utf-8')).hexdigest()
-                        was_analyzed = any(
-                            item.get('meeting_id', item.get('path')) == meeting_id
-                            and item.get('snapshot', {}).get('analyzed_meeting_id') == meeting_id
-                            for item in st.session_state.uploads
-                        )
-
                         remember_upload(uploaded.name, text)
                         st.session_state[widget_key] = signature
-
-                        # remember_upload/select_meeting 뒤에 현재 회의 ID가 설정됩니다.
-                        already_analyzed = (
-                            st.session_state.get('analyzed_meeting_id') == meeting_id
-                            or was_analyzed
-                        )
-
-                        if not already_analyzed:
-                            try:
-                                with st.spinner('회의록을 분석하고 요약과 업무를 정리하고 있습니다...'):
-                                    result = summarize_meeting()
-
-                                if result.get('status') == 'failed':
-                                    st.session_state[widget_key] = ''
-                                    st.error(result.get('error', '회의록 분석에 실패했습니다.'))
-                                else:
-                                    checkpoint_current_meeting()
-                                    st.success('회의록 요약과 업무 정리가 완료됐습니다.')
-                            except Exception as error:
-                                st.session_state[widget_key] = ''
-                                st.error('회의록 분석 중 오류가 발생했습니다. ' + str(error))
-
                         st.rerun()
 
-    if st.session_state.get('meeting_id'):
-        st.caption('현재 회의: ' + st.session_state.get('current_meeting_name', '선택한 회의록'))
+    meeting_id = st.session_state.get('meeting_id', '')
+    if meeting_id:
+        st.caption(
+            '현재 회의: '
+            + st.session_state.get('current_meeting_name', '선택한 회의록')
+        )
+
+        already_analyzed = (
+            st.session_state.get('analyzed_meeting_id') == meeting_id
+        )
+
+        if already_analyzed:
+            st.success('이 회의록은 이미 요약과 업무 생성이 완료됐습니다.')
+        else:
+            if st.button(
+                '요약 및 업무 생성',
+                key='summarize_meeting_' + location + '_' + meeting_id,
+                type='primary',
+                use_container_width=True,
+            ):
+                try:
+                    with st.spinner(
+                        '회의록을 분석하고 요약과 업무를 정리하고 있습니다...'
+                    ):
+                        result = summarize_meeting()
+
+                    if result.get('status') == 'failed':
+                        st.error(
+                            result.get('error', '회의록 분석에 실패했습니다.')
+                        )
+                    else:
+                        checkpoint_current_meeting()
+                        st.success('회의록 요약과 업무 정리가 완료됐습니다.')
+                        st.rerun()
+                except Exception as error:
+                    st.error('회의록 분석 중 오류가 발생했습니다. ' + str(error))
 
     render_meeting_date(location)
 
@@ -2169,9 +2175,19 @@ def render_meeting_picker(location):
         f'최근 회의 ({len(st.session_state.uploads)}/{MAX_MEETING_HISTORY})',
         expanded=location == 'meetings',
     ):
-        st.caption('현재 접속 세션에서 원문·분석·업무·최근 대화를 보관합니다. 새 접속/서버 재시작 후에는 초기화될 수 있습니다.')
+        st.caption(
+            '현재 접속 세션에서 원문·분석·업무·최근 대화를 보관합니다. '
+            '새 접속/서버 재시작 후에는 초기화될 수 있습니다.'
+        )
+
         for item in st.session_state.uploads[:MAX_MEETING_HISTORY]:
-            badge = ' · 현재' if item.get('meeting_id', item['path']) == st.session_state.get('meeting_id') else ''
+            item_meeting_id = item.get('meeting_id', item['path'])
+            badge = (
+                ' · 현재'
+                if item_meeting_id == st.session_state.get('meeting_id')
+                else ''
+            )
+
             if st.button(
                 item['name'] + ' · ' + item['saved_at'] + badge,
                 key=location + '_history_' + item['path'],
@@ -2179,10 +2195,13 @@ def render_meeting_picker(location):
             ):
                 select_meeting(item['text'])
                 st.rerun()
+
         if not st.session_state.uploads:
             st.caption('업로드한 회의록이 없습니다.')
         else:
-            st.caption('기록 보관·복원은 사이드바의 기록 백업 · 복원에서 이용하세요.')
+            st.caption(
+                '기록 보관·복원은 사이드바의 기록 백업 · 복원에서 이용하세요.'
+            )
 
 
 def render_meeting_date(location):
