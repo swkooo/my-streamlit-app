@@ -1778,7 +1778,7 @@ def run_request(request_text, audio_value):
         speak_message(message)
 
     checkpoint_current_meeting()
-    st.rerun()
+    st.rerun(scope="app")
 
 
 def briefing_text():
