@@ -1215,211 +1215,386 @@ def calendar_error_message(error):
     return 'Google 연동에 실패했습니다. Google 연결 진단에서 인증과 API 연결을 확인하세요.'
 
 
+
 # ========================================================================
+
 # 블록 08 | 음성 생성·재생
+
 # 완성된 텍스트를 Gemini로 낭독하고 브라우저에서 재생합니다. 즉시 음성 재생 기능을 유지합니다.
+
 # 음성 입력의 STT는 블록 9 run_request에서 수행합니다.
+
 # 이 조각을 저장하는 것만으로 음성 API가 호출되지는 않습니다.
+
 # ========================================================================
 
 # PCM 바이트에 WAV 헤더를 붙입니다. 파일을 서버에 저장하지 않습니다.
+
 def pcm_to_wav(pcm, rate=24000):
+
     buf = io.BytesIO()
+
     with wave.open(buf, "wb") as wf:
+
         wf.setnchannels(1)
+
         wf.setsampwidth(2)
+
         wf.setframerate(rate)
+
         wf.writeframes(pcm)
+
     return buf.getvalue()
 
 
 # 완성된 답변을 Gemini Live로 읽어 WAV 바이트를 반환합니다. 도구 선택은 하지 않습니다.
+
 async def _live_speak_impl(text, retry=False):
+
     """조각 하나를 Gemini Live로 낭독해 PCM을 받습니다. retry=True면 대본 형식으로 감싸 다시 요청합니다."""
+
     if not os.getenv("GEMINI_API_KEY"):
+
         raise RuntimeError("GEMINI_API_KEY가 없습니다.")
+
     gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
     spoken = bytearray()
+
     async with gemini.aio.live.connect(
+
         model="gemini-3.8-live",
+
         config={
+
             "response_modalities": ["AUDIO"],
+
             "system_instruction": VOICE_RETRY_INSTRUCTIONS if retry else VOICE_INSTRUCTIONS,
+
             "speech_config": {
+
                 "voice_config": {
+
                     "prebuilt_voice_config": {"voice_name": "Leda"}
+
                 }
+
             },
+
         },
+
     ) as session:
+
         await session.send_client_content(
+
             turns=types.Content(role="user", parts=[types.Part(
+
                 text="다음 <대본>을 그대로 낭독하세요.\n<대본>\n"+text+"\n</대본>" if retry else text)]),
+
             turn_complete=True,
+
         )
+
         async for msg in session.receive():
+
             if msg.data:
+
                 spoken.extend(msg.data)
+
             server_content = msg.server_content
+
             if server_content and server_content.turn_complete:
+
                 break
+
     return bytes(spoken)  # PCM. 비었는지는 _speak_chunk에서 확인합니다.
 
 
 def speech_chunks(text, limit=VOICE_CHUNK_CHARS):
+
     """문장 경계에서 limit자 이내 조각으로 나눕니다. 한 문장이 너무 길면 쉼표·공백에서 한 번 더 나눕니다."""
+
     sentences=[s.strip() for s in re.split(r'(?<=[.!?。])\s+|\n+',text or '') if s.strip()]
+
     pieces=[]
+
     for sentence in sentences:
+
         while len(sentence)>limit:
+
             cut=max(sentence.rfind(', ',0,limit),sentence.rfind(' ',0,limit))
+
             cut=cut if cut>limit//3 else limit
+
             pieces.append(sentence[:cut].strip());sentence=sentence[cut:].strip(' ,')
+
         if sentence:pieces.append(sentence)
+
     chunks,current=[],''
+
     for piece in pieces:
+
         if current and len(current)+1+len(piece)>limit:chunks.append(current);current=piece
+
         else:current=(current+' '+piece).strip()
+
     if current:chunks.append(current)
+
     return chunks
 
 
 def audio_too_short(pcm, text):
+
     """Live 응답은 가끔 비거나 잘려서 옵니다. 글자 수에 비해 너무 짧으면 실패로 봅니다."""
+
     return len(pcm)/48000 < max(0.5,len(text)*VOICE_MIN_SECONDS_PER_CHAR)  # 24kHz·16bit·mono = 48000바이트/초
 
 
 async def _speak_chunk(text, gate):
+
     """조각 하나를 낭독합니다. 빈/잘린 응답이면 대본 형식으로 최대 VOICE_ATTEMPTS번까지 다시 생성합니다."""
+
     async with gate:
+
         for attempt in range(VOICE_ATTEMPTS):
+
             pcm=await _live_speak_impl(text,retry=attempt>0)
+
             if not audio_too_short(pcm,text):return pcm
+
     raise RuntimeError('음성 응답이 비어 있거나 잘렸습니다.')
 
 
 async def _live_speak_all(text):
+
     """조각을 최대 VOICE_PARALLEL개씩 동시에 만들고 원래 순서대로 0.25초 쉼을 넣어 이어 붙입니다."""
+
     parts=speech_chunks(text)
+
     if not parts:raise RuntimeError('읽을 문장이 없습니다.')
+
     gate=asyncio.Semaphore(VOICE_PARALLEL)
+
     pcms=await asyncio.gather(*[_speak_chunk(part,gate) for part in parts])
+
     pause=b'\x00\x00'*int(24000*0.25)
+
     return pcm_to_wav(pause.join(pcms))
 
 
 async def live_speak(text, timeout=VOICE_TIMEOUT_SECONDS):
+
     """연결 시작부터 모든 조각의 음성 수신 완료까지 전체에 제한 시간을 적용합니다."""
+
     return await asyncio.wait_for(_live_speak_all(text), timeout=timeout)
 
 
 def speech_text(text):
+
     """화면용 마크다운 기호(**, #, 목록 기호, 링크)를 낭독용 일반 문장으로 정리합니다."""
+
     text=re.sub(r'\[([^\]]+)\]\([^)]+\)',r'\1',text or '')
+
     text=re.sub(r'[*_`#>]+','',text)
+
     text=re.sub(r'^\s*(?:[-•]|\d+\.)\s+','',text,flags=re.M)
+
     return re.sub(r'\n{2,}','\n',text).strip()
 
 
 def _tts_pcm(text):
+
     """Gemini 전용 TTS로 답변 전체를 한 번에 낭독해 PCM(24kHz·16bit·mono)을 받습니다.
+
     낭독할 문장만 보냅니다. 지시문을 붙이면 그 문장까지 읽기 때문입니다."""
+
     if not os.getenv("GEMINI_API_KEY"):
+
         raise RuntimeError("GEMINI_API_KEY가 없습니다.")
+
     gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
+
                           http_options=types.HttpOptions(timeout=VOICE_TTS_TIMEOUT_SECONDS*1000))
+
     response = gemini.models.generate_content(
+
         model=VOICE_MODEL,
+
         contents=text,
+
         config=types.GenerateContentConfig(
+
             response_modalities=["AUDIO"],
+
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE_NAME))),
+
         ),
+
     )
+
     content = response.candidates[0].content if response.candidates else None
+
     parts = content.parts if content and content.parts else []
-    return b"".join(p.inline_data.data for p in parts if p.inline_data and p.inline_data.data)
+
+    return b"".join(audio_to_pcm(p.inline_data.data) for p in parts if p.inline_data and p.inline_data.data)
+
+
+def audio_to_pcm(data):
+
+    """TTS 응답에서 소리(PCM)만 꺼냅니다.
+
+    gemini-3.8-flash-tts는 원시 PCM이 아니라 WAV 파일 전체(앞 헤더 + 뒤쪽 C2PA 출처 정보)를 돌려줍니다.
+
+    이를 그대로 다시 WAV로 감싸면 헤더와 출처 정보까지 소리로 재생돼 끝에 약 0.1초 '터지는' 잡음이 납니다."""
+
+    if data[:4] != b"RIFF":
+
+        return data  # 원시 PCM(24kHz·16bit·mono)이면 그대로 사용
+
+    with wave.open(io.BytesIO(data)) as wf:
+
+        if (wf.getframerate(), wf.getsampwidth(), wf.getnchannels()) != (24000, 2, 1):
+
+            raise RuntimeError("지원하지 않는 음성 형식입니다.")  # 예비 Live 경로로 넘어갑니다.
+
+        return wf.readframes(wf.getnframes())
 
 
 def synthesize_speech(text):
+
     """1순위 전용 TTS(같은 목소리), 실패하면 2순위 Live 조각 동시 생성. 반환: (WAV 바이트, 'tts' 또는 'live')"""
+
     started = time.time()
+
     for _ in range(VOICE_TTS_ATTEMPTS):
+
         if time.time()-started > VOICE_TTS_TIMEOUT_SECONDS:
+
             break
+
         try:
+
             pcm = _tts_pcm(text)
+
             if not audio_too_short(pcm, text):
+
                 return pcm_to_wav(pcm), "tts"
+
         except Exception:
+
             pass  # 503(요청 몰림)·시간 초과·빈 응답이면 한 번 더 시도한 뒤 예비 경로로 넘어갑니다.
+
     return asyncio.run(live_speak(text, VOICE_TIMEOUT_SECONDS)), "live"
 
 
 def voice_script(text):
+
     """아주 긴 답변을 낭독 대본으로 줄입니다. 김 대리 업무명·마감은 모두 남기고 새 사실은 추가하지 않습니다."""
+
     response=client.with_options(timeout=VOICE_SCRIPT_TEXT_TIMEOUT_SECONDS).responses.create(
+
         model=MODEL,instructions=VOICE_SCRIPT_INSTRUCTIONS,input=text)
+
     script=speech_text(response.output_text or '')
+
     if not script:raise RuntimeError('낭독 대본이 비어 있습니다.')
+
     return script
 
 
-
 # 저장된 음성을 브라우저에서 재생합니다. 중복 재생 방지용 상태를 사용합니다.
+
 def render_voice():
-    """A stable compact player; history controls do not interrupt autoplay."""
-    vault = st.session_state.audio_vault
-    if not vault:
-        return
-    active = st.session_state.get('active_audio_id')
-    if active not in vault:
-        active = next(reversed(vault))
-        st.session_state.active_audio_id = active
-    with st.container(border=True, key='voice_player'):
-        st.caption('답변 음성 · ' + speech_text(vault[active]['label']).replace('\n', ' ')[:64])
-        st.audio(vault[active]['data'], format='audio/wav',
-                 autoplay=st.session_state.get('autoplay_audio_id', '') == active)
-        with st.expander('이전 음성 · 다운로드'):
-            options = list(reversed(vault))
-            chosen = st.selectbox('다시 들을 답변', options, index=options.index(active),
-                format_func=lambda key: vault[key]['created_at'][11:19] + ' · ' + speech_text(vault[key]['label']).replace('\n', ' ')[:55],
-                key='audio_pick_' + active)
-            if chosen != active:
-                st.session_state.active_audio_id = chosen
-                st.session_state.autoplay_audio_id = chosen
-                st.rerun()
-            st.download_button('음성 다운로드', vault[active]['data'], file_name='answer.wav',
-                               mime='audio/wav', key='audio_download_' + active)
-            st.caption(f'최근 {MAX_AUDIO_ITEMS}개 · 총 {MAX_AUDIO_BYTES // 1024 // 1024}MB까지 현재 세션에 보관합니다.')
 
+    """기본 플레이어 하나로 자동 재생·일시정지·재개·탐색을 제공합니다."""
 
+    vault=st.session_state.audio_vault
+
+    if not vault:return
+
+    active=st.session_state.get('active_audio_id')
+
+    if active not in vault:active=next(reversed(vault))
+
+    options=list(reversed(vault))
+
+    with st.container(border=True):
+
+        st.caption(f'답변 음성 · 최근 {MAX_AUDIO_ITEMS}개 / 총 {MAX_AUDIO_BYTES//1024//1024}MB 이내 · 현재 세션 보관')
+
+        chosen=st.selectbox('다시 들을 답변',options,index=options.index(active),
+
+            format_func=lambda key:vault[key]['created_at'][11:19]+' · '+vault[key]['label'],key='audio_pick_'+active)
+
+        if chosen!=active:
+
+            st.session_state.active_audio_id=chosen
+
+            st.session_state.autoplay_audio_id=chosen
+
+            st.rerun()
+
+        # 자동 재생 표시를 지우지 않고 유지합니다. 화면이 다시 그려져도 플레이어 설정이 그대로라 멈추지 않고,
+
+        # Streamlit은 같은 플레이어를 한 번만 자동 재생하므로 다시 처음부터 재생되지도 않습니다.
+
+        autoplay=st.session_state.get('autoplay_audio_id','')==active
+
+        st.audio(vault[active]['data'],format='audio/wav',autoplay=autoplay)
+
+        st.caption('플레이어에서 일시정지/계속 재생이 가능합니다. 재생 막대를 맨 앞으로 옮기면 처음부터 들을 수 있습니다.')
+
+        st.download_button('이 음성 다운로드',vault[active]['data'],file_name='answer.wav',mime='audio/wav',key='audio_download_'+active)
 
 
 def speak_message(message):
+
     """답변을 음성으로 만듭니다. 아주 긴 답변은 업무를 모두 담은 낭독 대본으로 줄여 읽습니다.
+
     텍스트 답변은 항상 그대로 유지합니다. voice_mode: full(전체) / script(낭독 대본) / failed,
+
     voice_engine: tts(전용 TTS) / live(예비 방식)."""
+
     full=speech_text(message['content'])
+
     script,mode=full,'full'
+
     if len(full)>VOICE_SCRIPT_THRESHOLD:
+
         try:script,mode=voice_script(full),'script'
+
         except Exception:pass  # 대본 생성이 실패하면 전체 답변을 그대로 읽습니다.
+
     try:
+
         wav,engine=synthesize_speech(script)
+
         cache_answer_audio(message,wav)
+
         message['voice_mode']=mode
+
         message['voice_engine']=engine
+
         if mode=='script':message['voice_text']=script
+
         else:message.pop('voice_text',None)
+
         return True
+
     except (TimeoutError, asyncio.TimeoutError):
+
         st.session_state.voice_error=f'음성 생성이 {VOICE_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다. 텍스트 답변은 유지됩니다.'
+
     except Exception:
+
         st.session_state.voice_error='음성 생성에 실패했습니다. 텍스트 답변은 유지됩니다.'
+
     message['voice_mode']='failed'
+
     return False
+
 
 
 # ========================================================================
