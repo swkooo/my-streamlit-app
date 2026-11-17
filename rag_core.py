@@ -32,9 +32,7 @@ def load_pages(filepath):
         pymupdf.set_messages(path=os.devnull)
     except Exception:
         pass
-    # 로더가 쪽마다 Tesseract를 찾는다. 없으면 Windows 콘솔이 CP949로 오류를 찍고,
-    # UTF-8 모드의 subprocess 읽기 스레드가 UnicodeDecodeError를 낸다. 백서는 텍스트 PDF다.
-    return PyMuPDF4LLMLoader(filepath, use_ocr=False).load()
+    return PyMuPDF4LLMLoader(filepath).load()
 
 
 def clean_line(line):
@@ -830,16 +828,8 @@ class Neo4jStore:
         RETURN a.key AS source, r.type AS relation, b.key AS target, r.chunk_ids AS chunk_ids"""
 
     def __init__(self, uri, user, password, database=None):
-        import certifi
-        from neo4j import GraphDatabase, TrustCustomCAs
-        # Windows 인증서 저장소가 Aura 인증서를 self-signed로 거절한다.
-        # neo4j+s 는 시스템 인증서만 허용하므로 certifi 묶음으로 검증한다.
-        scheme, _, host = uri.partition('://')
-        kwargs = {}
-        if scheme in ('neo4j+s', 'bolt+s'):
-            uri = f"{scheme.removesuffix('+s')}://{host}"
-            kwargs = {'encrypted': True, 'trusted_certificates': TrustCustomCAs(certifi.where())}
-        self.driver = GraphDatabase.driver(uri, auth=(user, password), **kwargs)
+        from neo4j import GraphDatabase
+        self.driver = GraphDatabase.driver(uri, auth=(user, password))
         self.driver.verify_connectivity()
         self.database = database
 
